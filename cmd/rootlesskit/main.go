@@ -142,6 +142,14 @@ func main() {
 			Aliases: []string{"p"},
 			Usage:   "publish ports. e.g. \"127.0.0.1:8080:80/tcp\"",
 		},
+		&cli.StringFlag{
+			Name:  "uidmap",
+			Usage: "Specify child user namespace UID mapping. e.g. \"0:1000:1\"",
+		},
+		&cli.StringFlag{
+			Name:  "gidmap",
+			Usage: "Specify child user namespace GID mapping. e.g. \"0:1000:1\"",
+		},
 		&cli.BoolFlag{
 			Name:  "pidns",
 			Usage: "create a PID namespace",
@@ -233,6 +241,8 @@ func createParentOpt(clicontext *cli.Context, pipeFDEnvKey, stateDirEnvKey, pare
 		ParentEUIDEnvKey: parentEUIDEnvKey,
 		ParentEGIDEnvKey: parentEGIDEnvKey,
 		Propagation:      clicontext.String("propagation"),
+		UIDMap:           clicontext.String("uidmap"),
+		GIDMap:           clicontext.String("gidmap"),
 	}
 	opt.StateDir = clicontext.String("state-dir")
 	if opt.StateDir == "" {

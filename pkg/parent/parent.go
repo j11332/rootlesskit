@@ -29,6 +29,7 @@ import (
 	"github.com/rootless-containers/rootlesskit/pkg/sigproxy/signal"
 )
 
+// Opt - arguments of parent process
 type Opt struct {
 	PipeFDEnvKey     string               // needs to be set
 	StateDir         string               // directory needs to be precreated
@@ -36,6 +37,8 @@ type Opt struct {
 	NetworkDriver    network.ParentDriver // nil for HostNetwork
 	PortDriver       port.ParentDriver    // nil for --port-driver=none
 	PublishPorts     []port.Spec
+	UIDMap           string
+	GIDMap           string
 	CreatePIDNS      bool
 	CreateCgroupNS   bool
 	CreateUTSNS      bool
@@ -77,10 +80,12 @@ func checkPreflight(opt Opt) error {
 	return nil
 }
 
+// Parent - start parent process
 func Parent(opt Opt) error {
 	if err := checkPreflight(opt); err != nil {
 		return err
 	}
+
 	lockPath := filepath.Join(opt.StateDir, StateFileLock)
 	lock := flock.NewFlock(lockPath)
 	locked, err := lock.TryLock()
@@ -92,6 +97,7 @@ func Parent(opt Opt) error {
 	}
 	defer os.RemoveAll(opt.StateDir)
 	defer lock.Unlock()
+
 	// when the previous execution crashed, the state dir may not be removed successfully.
 	// explicitly remove everything in the state dir except the lock file here.
 	for _, f := range []string{StateFileChildPID} {
@@ -105,6 +111,7 @@ func Parent(opt Opt) error {
 	if err != nil {
 		return err
 	}
+
 	cmd := exec.Command("/proc/self/exe", os.Args[1:]...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Pdeathsig:  syscall.SIGKILL,
@@ -143,7 +150,30 @@ func Parent(opt Opt) error {
 	if err := cmd.Start(); err != nil {
 		return errors.Wrap(err, "failed to start the child")
 	}
-	if err := setupUIDGIDMap(cmd.Process.Pid); err != nil {
+
+	var uidMap []idtools.IDMap
+	if opt.UIDMap != "" {
+		uMapEntry, err := idtools.ASCII2IDMap(opt.UIDMap)
+		if err != nil {
+			return errors.Wrap(err, "failed to parse uidmap")
+		}
+		logrus.Debugf("UIDMap: %s Host %d -> Container %d (Size: %d)",
+			opt.UIDMap, uMapEntry.HostID, uMapEntry.ContainerID, uMapEntry.Size)
+		uidMap = append(uidMap, uMapEntry)
+	}
+
+	var gidMap []idtools.IDMap
+	if opt.GIDMap != "" {
+		gMapEntry, err := idtools.ASCII2IDMap(opt.GIDMap)
+		if err != nil {
+			return errors.Wrap(err, "failed to parse gidmap")
+		}
+		logrus.Debugf("GIDMap: %s Host %d -> Container %d (Size: %d)",
+			opt.GIDMap, gMapEntry.HostID, gMapEntry.ContainerID, gMapEntry.Size)
+		gidMap = append(gidMap, gMapEntry)
+	}
+
+	if err := setupUIDGIDMap(cmd.Process.Pid, uidMap, gidMap); err != nil {
 		return errors.Wrap(err, "failed to setup UID/GID map")
 	}
 	sigc := sigproxy.ForwardAllSignals(context.TODO(), cmd.Process.Pid)
@@ -243,43 +273,65 @@ func Parent(opt Opt) error {
 	return err
 }
 
-func newugidmapArgs() ([]string, []string, error) {
+func newugidmapArgs(uidMap []idtools.IDMap, gidMap []idtools.IDMap) ([]string, []string, error) {
 	u, err := user.Current()
 	if err != nil {
 		return nil, nil, err
 	}
-	uidMap := []string{
-		"0",
-		u.Uid,
-		"1",
+
+	// uidMapArgs: arguments of newuidmap command
+	var uidMapArgs []string
+	// uidMapLast: last assigned UID
+	uidMapLast := 1
+	if uidMap == nil {
+		uidMapArgs = append(uidMapArgs, []string{"0", u.Uid, "1"}...)
+	} else {
+		for _, i := range uidMap {
+			uidMapArgs = append(uidMapArgs, []string{
+				strconv.Itoa(i.ContainerID),
+				strconv.Itoa(i.HostID),
+				strconv.Itoa(i.Size),
+			}...)
+			uidMapLast = i.ContainerID + 1
+		}
 	}
-	gidMap := []string{
-		"0",
-		u.Gid,
-		"1",
+
+	var gidMapArgs []string
+	gidMapLast := 1
+	if gidMap == nil {
+		gidMapArgs = append(gidMapArgs, []string{"0", u.Gid, "1"}...)
+	} else {
+		for _, i := range gidMap {
+			gidMapArgs = append(gidMapArgs, []string{
+				strconv.Itoa(i.ContainerID),
+				strconv.Itoa(i.HostID),
+				strconv.Itoa(i.Size),
+			}...)
+			gidMapLast = i.ContainerID + 1
+		}
 	}
 
 	uid, err := strconv.Atoi(u.Uid)
 	if err != nil {
 		return nil, nil, err
 	}
+
 	ims, err := idtools.NewIdentityMapping(uid, u.Username)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	uidMapLast := 1
 	for _, im := range ims.UIDs() {
-		uidMap = append(uidMap, []string{
+		uidMapArgs = append(uidMapArgs, []string{
 			strconv.Itoa(uidMapLast),
 			strconv.Itoa(im.HostID),
 			strconv.Itoa(im.Size),
 		}...)
 		uidMapLast += im.Size
 	}
-	gidMapLast := 1
+
 	for _, im := range ims.GIDs() {
-		gidMap = append(gidMap, []string{
+		gidMapArgs = append(gidMapArgs, []string{
 			strconv.Itoa(gidMapLast),
 			strconv.Itoa(im.HostID),
 			strconv.Itoa(im.Size),
@@ -287,11 +339,11 @@ func newugidmapArgs() ([]string, []string, error) {
 		gidMapLast += im.Size
 	}
 
-	return uidMap, gidMap, nil
+	return uidMapArgs, gidMapArgs, nil
 }
 
-func setupUIDGIDMap(pid int) error {
-	uArgs, gArgs, err := newugidmapArgs()
+func setupUIDGIDMap(pid int, uidMap []idtools.IDMap, gidMap []idtools.IDMap) error {
+	uArgs, gArgs, err := newugidmapArgs(uidMap, gidMap)
 	if err != nil {
 		return errors.Wrap(err, "failed to compute uid/gid map")
 	}

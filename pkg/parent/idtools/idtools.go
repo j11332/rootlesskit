@@ -237,3 +237,39 @@ func parseSubidFile(path string, uid int, username string) (ranges, error) {
 	}
 	return rangeList, s.Err()
 }
+
+// ASCII2IDMap converts ID mapping string to IDMap
+func ASCII2IDMap(s string) (IDMap, error) {
+	var idmap IDMap
+
+	parts := strings.Split(s, ":")
+	if len(parts) != 3 {
+		return idmap, fmt.Errorf("Failed to parse idmap")
+	}
+
+	cid, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return idmap, fmt.Errorf("Parse: invalid cid %s: %v", parts[0], err)
+	}
+
+	hid, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return idmap, fmt.Errorf("Parse: invalid hid %s: %v", parts[1], err)
+	}
+
+	size, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return idmap, fmt.Errorf("Parse; Invalid size %s: %v", parts[2], err)
+	} else if size != 1 {
+		return idmap, fmt.Errorf("TODO: Invalid size %d: Third field will be 1", size)
+	}
+
+	idmap = IDMap{
+		ContainerID: cid,
+		HostID:      hid,
+		Size:        size,
+	}
+
+	return idmap, nil
+
+}
